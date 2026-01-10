@@ -1,17 +1,27 @@
+require('dotenv').config();
 const express = require('express');
-const app = express();
+const { enqueue, dequeue } = require('./queue');
+const { postToX } = require('./x');
+const { postToLinkedIn } = require('./linkedin');
 
+const app = express();
 app.use(express.json());
 
-app.post('/social-webhook', (req, res) => {
-  const { network, title, url, image, lang, type } = req.body;
+setInterval(async () => {
+  const job = await dequeue();
+  if (!job) return;
 
-  console.log('INCOMING DATA:', req.body);
+  if (job.network === 'x') await postToX(job);
+  if (job.network === 'linkedin') await postToLinkedIn(job);
+}, 3000);
 
-  res.json({ status: 'ok' });
+app.post('/social-webhook', async (req, res) => {
+  await enqueue(req.body);
+  res.json({ status: 'queued' });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log('Webhook running on port', PORT);
+app.get('/dashboard', (req, res) => {
+  res.send('<h1>Webhook running</h1>');
 });
+
+app.listen(process.env.PORT || 3000);
