@@ -1,79 +1,88 @@
 require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 
 const { enqueue, dequeue } = require('./queue');
 const { postToX } = require('./x');
 const { postToLinkedIn } = require('./linkedin');
-const postToYouTube = require('./youtube');
-const postToTikTok = require('./tiktok');
+const uploadYouTube = require('./youtube');
+const uploadTikTok = require('./tiktok');
 
 const app = express();
 app.use(express.json());
 
-/* ================= LOGGER ================= */
+const LOG_FILE = path.join(__dirname, 'webhook.log');
+const MAX_ATTEMPTS = 3;
+const WORKER_DELAY = 3000;
+
+// ---------- LOGGER ----------
 function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}`;
-  console.log(line);
-  fs.appendFileSync('./webhook.log', line + '\n');
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  fs.appendFileSync(LOG_FILE, line);
+  console.log(line.trim());
 }
 
-/* ================= WEBHOOK ================= */
+// ---------- DISPATCH ----------
+async function dispatch(job) {
+  switch (job.network) {
+    case 'x':
+      return postToX(job);
+    case 'linkedin':
+      return postToLinkedIn(job);
+    case 'youtube':
+      return uploadYouTube(job);
+    case 'tiktok':
+      return uploadTikTok(job);
+    default:
+      throw new Error(`Unknown network: ${job.network}`);
+  }
+}
+
+// ---------- WORKER ----------
+setInterval(async () => {
+  const job = await dequeue();
+  if (!job) return;
+
+  job.attempts = (job.attempts || 0) + 1;
+  log(`PROCESS ${job.network} | attempt ${job.attempts}`);
+
+  try {
+    await dispatch(job);
+    log(`SUCCESS ${job.network} | ${job.lang}`);
+  } catch (err) {
+    log(`ERROR ${job.network}: ${err.message}`);
+
+    if (job.attempts < MAX_ATTEMPTS) {
+      log(`RETRY ${job.network}`);
+      await enqueue(job);
+    } else {
+      log(`FAILED ${job.network} after ${MAX_ATTEMPTS} attempts`);
+    }
+  }
+}, WORKER_DELAY);
+
+// ---------- WEBHOOK ----------
 app.post('/social-webhook', async (req, res) => {
-  const job = {
+  const payload = {
     ...req.body,
     attempts: 0,
     createdAt: Date.now()
   };
 
-  await enqueue(job);
-  log(`QUEUED ${job.network} | ${job.lang}`);
+  await enqueue(payload);
+  log(`QUEUED ${payload.network} | ${payload.lang}`);
 
   res.json({ status: 'queued' });
 });
 
-/* ================= WORKER ================= */
-async function worker() {
-  const job = await dequeue();
-  if (!job) return;
-
-  try {
-    job.attempts++;
-    log(`PROCESS ${job.network} | try ${job.attempts}`);
-
-    await dispatch(job);
-
-    log(`SUCCESS ${job.network}`);
-  } catch (e) {
-    log(`ERROR ${job.network}: ${e.message}`);
-
-    if (job.attempts < 3) {
-      await enqueue(job);
-      log(`RETRY ${job.network}`);
-    } else {
-      log(`FAILED ${job.network}`);
-    }
-  }
-}
-
-/* ================= DISPATCH ================= */
-async function dispatch(job) {
-  if (job.network === 'x') return postToX(job);
-  if (job.network === 'linkedin') return postToLinkedIn(job);
-  if (job.network === 'youtube') return postToYouTube(job);
-  if (job.network === 'tiktok') return postToTikTok(job);
-
-  throw new Error('Unknown network');
-}
-
-/* ================= DASHBOARD ================= */
+// ---------- DASHBOARD ----------
 app.get('/dashboard', async (req, res) => {
-  res.sendFile(__dirname + '/public/dashboard.html');
+  res.sendFile(path.join(__dirname, 'public/dashboard.html'));
 });
 
-/* ================= START ================= */
-setInterval(worker, 3000);
-
-app.listen(process.env.PORT || 3000, () => {
-  log('Webhook server started');
+// ---------- START ----------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  log(`Webhook running on port ${PORT}`);
 });
